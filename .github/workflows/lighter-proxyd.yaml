@@ -1,0 +1,30 @@
+# Tests proxyd on the lighter branch, which carries Lighter's changes on top of
+# an upstream proxyd release. Upstream's own tests run on CircleCI, which this
+# fork does not use.
+name: lighter-proxyd
+
+on:
+  push:
+    branches:
+      - lighter
+  pull_request:
+    branches:
+      - lighter
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proxyd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxyd/go.mod
+          cache-dependency-path: proxyd/go.sum
+      - run: go vet ./...
+      - run: go test ./...
