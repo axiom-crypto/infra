@@ -1,0 +1,26 @@
+ws_backend_group = "main"
+ws_method_whitelist = ["eth_getBlockReceipts", "eth_getLogs"]
+
+[server]
+rpc_port = 8545
+ws_port = 8546
+max_upstream_batch_size = 1
+# 3.5 MiB: room for three of the tests' 1 MB responses, not four.
+max_buffered_response_bytes = 3670016
+
+[backend]
+response_timeout_seconds = 5
+
+[backends]
+[backends.good]
+rpc_url = "$GOOD_BACKEND_RPC_URL"
+ws_url = "$GOOD_BACKEND_WS_URL"
+
+[backend_groups]
+[backend_groups.main]
+backends = ["good"]
+
+[rpc_method_mappings]
+eth_getBlockReceipts = "main"
+eth_getLogs = "main"
+eth_call = "main"

@@ -39,6 +39,13 @@ type ServerConfig struct {
 	// GracefulShutdownSeconds is the duration to wait during drain before shutting down.
 	// Defaults to 0 (no drain delay). Set to a positive value to enable graceful drain.
 	GracefulShutdownSeconds int `toml:"graceful_shutdown_seconds"`
+
+	// MaxBufferedResponseBytes caps the backend response bytes that all
+	// requests together hold in memory, from when they are read until the
+	// response to the client is written. A call that does not fit fails with
+	// ErrServerOverCapacity. proxyd's memory for a response is a few times its
+	// size. 0 (the default) is unlimited.
+	MaxBufferedResponseBytes int64 `toml:"max_buffered_response_bytes"`
 }
 
 type CacheConfig struct {

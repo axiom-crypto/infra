@@ -71,6 +71,13 @@ var (
 		Message:       "backend is over capacity",
 		HTTPErrorCode: 429,
 	}
+	// ErrServerOverCapacity fails a call whose backend response does not fit in
+	// what max_buffered_response_bytes leaves free.
+	ErrServerOverCapacity = &RPCErr{
+		Code:          JSONRPCErrorInternal - 12,
+		Message:       "server is over capacity, retry later",
+		HTTPErrorCode: 503,
+	}
 	ErrBackendBadResponse = &RPCErr{
 		Code:          JSONRPCErrorInternal - 13,
 		Message:       "backend returned an invalid response",
@@ -697,6 +704,10 @@ func (b *Backend) ForwardWithSource(ctx context.Context, reqs []*RPCReq, isBatch
 				"method", metricLabelMethod,
 			)
 			RecordBatchRPCError(ctx, b.Name, reqs, err)
+		case ErrServerOverCapacity:
+			// Not retried: the budget is shared by every request and backend,
+			// and a retry would only wait for other requests to free it.
+			RecordBatchRPCError(ctx, b.Name, reqs, err)
 		case ErrConsensusGetReceiptsCantBeBatched:
 			log.Warn(
 				"Received unsupported batch request for consensus_getReceipts",
@@ -817,6 +828,12 @@ func (b *Backend) ForwardRPC(ctx context.Context, res *RPCRes, id string, method
 }
 
 func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool) ([]*RPCRes, error) {
+	// Refused before the backend does any work, or changes any state, for a
+	// response proxyd would have no room to keep.
+	if !admitResponse(ctx) {
+		return nil, ErrServerOverCapacity
+	}
+
 	// we are concerned about network error rates, so we record 1 request independently of how many are in the batch
 	b.networkRequestsSlidingWindow.Incr()
 
@@ -949,9 +966,12 @@ func (b *Backend) doForward(ctx context.Context, rpcReqs []*RPCReq, isBatch bool
 		return nil, fmt.Errorf("response code %d", httpRes.StatusCode)
 	}
 
-	resB, err := io.ReadAll(LimitReader(httpRes.Body, b.maxResponseSize))
+	resB, err := io.ReadAll(newLeaseReader(ctx, LimitReader(httpRes.Body, b.maxResponseSize)))
 	if errors.Is(err, ErrLimitReaderOverLimit) {
 		return nil, ErrBackendResponseTooLarge
+	}
+	if errors.Is(err, ErrServerOverCapacity) {
+		return nil, ErrServerOverCapacity
 	}
 	if err != nil {
 		b.intermittentErrorsSlidingWindow.Incr()
@@ -1180,7 +1200,7 @@ func (bg *BackendGroup) ForwardWithSource(ctx context.Context, rpcReqs []*RPCReq
 	backendResp := <-ch
 
 	if backendResp.error != nil {
-		log.Error("error serving requests",
+		forwardErrorLog(backendResp.error)("error serving requests",
 			"req_id", GetReqID(ctx),
 			"auth", GetAuthCtx(ctx),
 			"err", backendResp.error,
@@ -1479,6 +1499,7 @@ type WSProxier struct {
 	requestSem            *semaphore.Weighted
 	cancel                context.CancelFunc
 	maxConcurrentRequests int64
+	responseBudget        *responseBudget
 }
 
 func NewWSProxier(backend *Backend, clientConn, backendConn *websocket.Conn, methodWhitelist *StringSet, onClose func()) *WSProxier {
@@ -1689,6 +1710,8 @@ func (w *WSProxier) releaseRequestSlot() {
 
 func (w *WSProxier) processClientRPC(ctx context.Context, msgType int, req *RPCReq, errC chan error) {
 	defer w.releaseRequestSlot()
+	ctx, releaseResponse := withResponseLease(ctx, w.responseBudget)
+	defer releaseResponse()
 
 	var res *RPCRes
 	if w.requestProcessor == nil {
@@ -2002,6 +2025,8 @@ func (bg *BackendGroup) ForwardRequestToBackendGroup(
 			}
 
 			if errors.Is(err, ErrBackendResponseTooLarge) ||
+				// the budget is server-wide, so no other backend has room either
+				errors.Is(err, ErrServerOverCapacity) ||
 				// we check for "request body too large" when first serving a request,
 				// so this is a special case where the backend has its own rules around
 				// request body size and returns a 413 error. We've seen this with quicknode

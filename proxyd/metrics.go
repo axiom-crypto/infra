@@ -322,6 +322,12 @@ var (
 		Help:      "Count of total batch RPC short-circuits.",
 	})
 
+	bufferedResponseBytesGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: MetricsNamespace,
+		Name:      "buffered_response_bytes",
+		Help:      "Backend response bytes held against max_buffered_response_bytes.",
+	})
+
 	rpcSpecialErrors = []string{
 		"nonce too low",
 		"gas price too high",

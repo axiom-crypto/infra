@@ -110,6 +110,7 @@ type Server struct {
 	txMonitor                *TxMonitor
 	isDraining               atomic.Bool
 	gracefulShutdownDuration time.Duration
+	responseBudget           *responseBudget
 }
 
 type limiterFunc func(method string) bool
@@ -437,6 +438,11 @@ func (s *Server) HandleRPC(w http.ResponseWriter, r *http.Request) {
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+
+	// Holds the backend responses of this request until it returns, after the
+	// response to the client is written.
+	ctx, releaseResponses := withResponseLease(ctx, s.responseBudget)
+	defer releaseResponses()
 
 	// User can provide an API key via the "X-Api-Key" header
 	apiKey := r.Header.Get("X-Api-Key")
@@ -863,7 +869,7 @@ func (s *Server) handleBatchRPC(ctx context.Context, reqs []json.RawMessage, isL
 					recordRPCCallsAll(callMethods, callBackends, RPCRequestSourceHTTP, statusCodeBadRequest)
 					return nil, false, "", httpRequestMethodLabel(isBatch, callMethods), err
 				}
-				log.Error(
+				forwardErrorLog(err)(
 					"error forwarding RPC batch",
 					"batch_size", len(elems),
 					"backend_group", group.backendGroup,
@@ -1000,6 +1006,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return s.handleWSRPC(ctx, req, isLimited, bypassLimit)
 	}
 	proxier.maxConcurrentRequests = s.maxConcurrentWSRPCs
+	proxier.responseBudget = s.responseBudget
 	go func() {
 		// Below call blocks so run it in a goroutine.
 		if err := proxier.Proxy(ctx); err != nil {
@@ -1049,7 +1056,7 @@ func (s *Server) handleWSRPCInner(ctx context.Context, req *RPCReq, isLimited li
 	res, servedBy, err := s.BackendGroups[group].ForwardWithSource(ctx, []*RPCReq{req}, false, RPCRequestSourceWS)
 	forwardDuration := time.Since(forwardStart)
 	if err != nil {
-		log.Error(
+		forwardErrorLog(err)(
 			"error forwarding WS RPC",
 			"backend_group", group,
 			"req_id", GetReqID(ctx),

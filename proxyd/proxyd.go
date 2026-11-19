@@ -36,6 +36,9 @@ func Start(config *Config) (*Server, func(), error) {
 	if config.RateLimit.UseAuthAlias && len(config.Authentication) == 0 {
 		log.Warn("use_auth_alias is enabled without authentication entries; requests will use IP-based rate limits")
 	}
+	if n := config.Server.MaxBufferedResponseBytes; n < 0 || (n > 0 && n < MinBufferedResponseBytes) {
+		return nil, nil, fmt.Errorf("max_buffered_response_bytes must be 0 (unlimited) or at least %d", MinBufferedResponseBytes)
+	}
 
 	for authKey := range config.Authentication {
 		if authKey == "none" {
@@ -552,6 +555,9 @@ func Start(config *Config) (*Server, func(), error) {
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error creating server: %w", err)
+	}
+	if config.Server.MaxBufferedResponseBytes > 0 {
+		srv.responseBudget = &responseBudget{size: config.Server.MaxBufferedResponseBytes}
 	}
 
 	// Construct and assign the monitor before any listener goroutine spawns so
