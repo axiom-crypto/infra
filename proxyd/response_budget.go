@@ -23,8 +23,9 @@ type responseBudget struct {
 	size      int64
 	perClient int64
 	held      int64
-	// Bytes each client holds, by the address its rate limits are counted
-	// under. A client that holds nothing has no entry.
+	// Bytes each client holds, by its address: the first entry of the rate
+	// limit header, which whatever is in front of proxyd must set. A client
+	// that holds nothing has no entry.
 	heldBy map[string]int64
 }
 
