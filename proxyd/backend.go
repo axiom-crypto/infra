@@ -1576,21 +1576,19 @@ func (w *WSProxier) clientPump(ctx context.Context, errC chan error) {
 		req, err := w.prepareClientMsg(msg)
 		if err != nil {
 			var id json.RawMessage
-			// method is the raw client-supplied string, used only for
-			// RecordRPCError below, which deliberately accepts unbounded
-			// cardinality. It must NOT be passed to metricMethodName: an
-			// arbitrary client-supplied method (e.g. "unknown") must not be
-			// able to masquerade as the MethodUnknown sentinel and evade the
-			// method_not_allowed bucket. metricLabel below is derived from
-			// req instead, since prepareClientMsg has exactly two failure
-			// modes: req == nil means ParseRPCReq failed (no method to speak
-			// of); req != nil means the method parsed but failed the
+			// The method name is client-supplied, so the metrics below never
+			// label with it: every distinct name would become a label value
+			// that Prometheus keeps for the life of the process, and one
+			// client could grow proxyd's memory without bound. metricLabel is
+			// derived from req rather than from metricMethodName, so a client
+			// cannot send the method "unknown" to masquerade as the
+			// MethodUnknown sentinel: prepareClientMsg has exactly two failure
+			// modes, req == nil when ParseRPCReq failed (no method to speak
+			// of) and req != nil when the method parsed but failed the
 			// whitelist check.
-			method := MethodUnknown
 			metricLabel := MethodUnknown
 			if req != nil {
 				id = req.ID
-				method = req.Method
 				metricLabel = MethodNotAllowed
 			}
 			log.Info(
@@ -1603,7 +1601,7 @@ func (w *WSProxier) clientPump(ctx context.Context, errC chan error) {
 			// the recorded status cannot drift from what the client receives.
 			errRes := NewRPCErrorRes(id, err)
 			msg = mustMarshalJSON(errRes)
-			RecordRPCError(ctx, BackendProxyd, method, err)
+			RecordRPCError(ctx, BackendProxyd, metricLabel, err)
 			RecordRPCCall(BackendProxyd, metricLabel, statusCodeForRPCRes(errRes), RPCRequestSourceWS)
 
 			// Send error response to client
@@ -1655,7 +1653,12 @@ func (w *WSProxier) clientPump(ctx context.Context, errC chan error) {
 			"req_id", GetReqID(ctx),
 		)
 
-		err = w.writeBackendConn(msgType, msg)
+		// Relays the request as proxyd decoded it, not the client's bytes.
+		// encoding/json matches keys case-insensitively and keeps the last of
+		// duplicate keys, while a backend may read only the exact "method" key,
+		// so the client's bytes can name one method to the whitelist above and
+		// another to the backend.
+		err = w.writeBackendConn(msgType, mustMarshalJSON(wsRelayReq(*req)))
 		if err != nil {
 			errC <- err
 			return
@@ -1800,6 +1803,17 @@ func (w *WSProxier) close() {
 			w.onClose()
 		}
 	})
+}
+
+// wsRelayReq is an RPCReq as clientPump relays it to a WebSocket backend: each
+// field appears only if the client sent it, so a call without "id" stays a
+// notification and gets no response, and an "id" or "params" of null stays
+// null.
+type wsRelayReq struct {
+	JSONRPC string          `json:"jsonrpc,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      json.RawMessage `json:"id,omitempty"`
 }
 
 func (w *WSProxier) prepareClientMsg(msg []byte) (*RPCReq, error) {
