@@ -15,17 +15,47 @@ import (
 const MinBufferedResponseBytes = 1 << 20
 
 // A responseBudget bounds the backend response bytes that all requests hold in
-// memory at once: [server] max_buffered_response_bytes.
+// memory at once, [server] max_buffered_response_bytes, and the part of them
+// that the requests of one client hold, max_buffered_response_bytes_per_client,
+// so that one client filling its part leaves the rest to the others.
 type responseBudget struct {
-	mu   sync.Mutex
-	size int64
-	held int64
+	mu        sync.Mutex
+	size      int64
+	perClient int64
+	held      int64
+	// Bytes each client holds, by its address: the first entry of the rate
+	// limit header, which whatever is in front of proxyd must set. A client
+	// that holds nothing has no entry.
+	heldBy map[string]int64
+}
+
+func newResponseBudget(size, perClient int64) *responseBudget {
+	if perClient == 0 {
+		perClient = size
+	}
+	return &responseBudget{size: size, perClient: perClient, heldBy: make(map[string]int64)}
+}
+
+// free is what client may still take. The caller holds mu.
+func (b *responseBudget) free(client string) int64 {
+	return min(b.size-b.held, b.perClient-b.heldBy[client])
+}
+
+// take moves n bytes to client, or back from it if n is negative. The caller
+// holds mu.
+func (b *responseBudget) take(client string, n int64) {
+	b.held += n
+	if b.heldBy[client] += n; b.heldBy[client] == 0 {
+		delete(b.heldBy, client)
+	}
+	bufferedResponseBytesGauge.Set(float64(b.held))
 }
 
 // A responseLease holds the backend response bytes of one client request, from
 // when they are read until the response to the client is written.
 type responseLease struct {
 	budget *responseBudget
+	client string
 	held   int64 // guarded by budget.mu, as is ended
 	ended  bool
 }
@@ -39,14 +69,13 @@ func withResponseLease(ctx context.Context, budget *responseBudget) (context.Con
 	if budget == nil {
 		return ctx, func() {}
 	}
-	lease := &responseLease{budget: budget}
+	lease := &responseLease{budget: budget, client: stripXFF(GetXForwardedFor(ctx))}
 	return context.WithValue(ctx, responseLeaseKey{}, lease), func() {
 		budget.mu.Lock()
 		defer budget.mu.Unlock()
 		if !lease.ended {
-			budget.held -= lease.held
+			budget.take(lease.client, -lease.held)
 			lease.held, lease.ended = 0, true
-			bufferedResponseBytesGauge.Set(float64(budget.held))
 		}
 	}
 }
@@ -58,12 +87,11 @@ func (l *responseLease) add(n int64) bool {
 	b := l.budget
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if l.ended || b.held+n > b.size {
+	if l.ended || n > b.free(l.client) {
 		return false
 	}
 	l.held += n
-	b.held += n
-	bufferedResponseBytesGauge.Set(float64(b.held))
+	b.take(l.client, n)
 	return true
 }
 
@@ -78,7 +106,7 @@ func admitResponse(ctx context.Context) bool {
 	b := lease.budget
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.size-b.held >= MinBufferedResponseBytes
+	return b.free(lease.client) >= MinBufferedResponseBytes
 }
 
 // A leaseReader holds every byte it reads on the lease in ctx, until the lease

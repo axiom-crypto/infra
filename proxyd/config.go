@@ -46,6 +46,14 @@ type ServerConfig struct {
 	// ErrServerOverCapacity. proxyd's memory for a response is a few times its
 	// size. 0 (the default) is unlimited.
 	MaxBufferedResponseBytes int64 `toml:"max_buffered_response_bytes"`
+
+	// MaxBufferedResponseBytesPerClient caps the part of
+	// MaxBufferedResponseBytes that the requests of one client hold, so that
+	// one client cannot fill the budget for all. A client is an address: the
+	// first entry of the rate limit header, which whatever is in front of
+	// proxyd must set, as for the per-IP rate limits. 0 (the default) is the
+	// whole budget.
+	MaxBufferedResponseBytesPerClient int64 `toml:"max_buffered_response_bytes_per_client"`
 }
 
 type CacheConfig struct {

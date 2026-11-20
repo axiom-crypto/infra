@@ -39,6 +39,9 @@ func Start(config *Config) (*Server, func(), error) {
 	if n := config.Server.MaxBufferedResponseBytes; n < 0 || (n > 0 && n < MinBufferedResponseBytes) {
 		return nil, nil, fmt.Errorf("max_buffered_response_bytes must be 0 (unlimited) or at least %d", MinBufferedResponseBytes)
 	}
+	if n := config.Server.MaxBufferedResponseBytesPerClient; n != 0 && (n < MinBufferedResponseBytes || n > config.Server.MaxBufferedResponseBytes) {
+		return nil, nil, fmt.Errorf("max_buffered_response_bytes_per_client must be 0 (the whole budget) or between %d and max_buffered_response_bytes", MinBufferedResponseBytes)
+	}
 
 	for authKey := range config.Authentication {
 		if authKey == "none" {
@@ -557,7 +560,7 @@ func Start(config *Config) (*Server, func(), error) {
 		return nil, nil, fmt.Errorf("error creating server: %w", err)
 	}
 	if config.Server.MaxBufferedResponseBytes > 0 {
-		srv.responseBudget = &responseBudget{size: config.Server.MaxBufferedResponseBytes}
+		srv.responseBudget = newResponseBudget(config.Server.MaxBufferedResponseBytes, config.Server.MaxBufferedResponseBytesPerClient)
 	}
 
 	// Construct and assign the monitor before any listener goroutine spawns so
